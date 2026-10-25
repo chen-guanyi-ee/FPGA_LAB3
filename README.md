@@ -1,7 +1,7 @@
 10/25
 做完高階突變
 正在低階flow當中
-完整資訊在handoff.md
+完整資訊在handoff.txt
 
 bonus
 可以錄多段 混著撥出(按鈕設置要哪幾段撥出)
