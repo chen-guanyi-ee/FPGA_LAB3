@@ -1,0 +1,138 @@
+# Lab3 handoff（2026-10-25）
+
+## 目前狀態
+
+- 板子：Nexys A7-100T（xc7a100t），工具：Vivado 2026.1。
+- 目前板上燒錄的是修正後的 block-form CIC2：
+  `build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`。
+- 對應原始碼：`Top_block_form_fixed.sv`。
+- PDM：3.125 MHz，250 倍降採樣，PCM 12.5 ksample/s。
+- 儲存：200,000 samples，7 個 32K x 7 BRAM bank。
+- DAC：100 MHz、7-bit 一階 sigma-delta；`AUD_PWM` 只拉低或 high-Z。
+- 錄音、自動播放、15 段速度、pause/resume 均已通過 regression。
+
+### 已固定、不再任意更改的規格
+
+- 濾波器選擇固定為 **CIC2**。
+- 錄音增益固定為 **64x**。
+- PCM／BRAM／DAC 固定為 **signed 7-bit**。
+
+CIC2 的內部演算法架構仍可最佳化，但輸出數學意義必須維持 CIC2，並用
+`DECIMATION=250` 與實際 PDM pin 更新時序驗證。不要因面積實驗改成 boxcar、
+CIC3 或 FIR，也不要改掉 64x、7-bit。
+
+目前 64x 是將 CIC 正規化右移量減少 6 bits；沒有飽和限制，取位後直接成為
+signed 7-bit，超出範圍會二補數回繞。
+
+## 本次 block-form 修正
+
+原 block-form 數學式本身與傳統 CIC2 等價，但 RTL 在 phase 0 使用一次 live
+`M_DATA`，10 ns 後的 phase 1 又讀一次 live `M_DATA`。實體麥克風可能在 clock
+edge 後更新資料，造成同一筆 PDM sample 的兩段運算吃到不同 bit，因此實聽音量
+變小、音質變差。
+
+`Top_block_form_fixed.sv` 已改為在 `pdm_ce` 鎖存 `M_DATA`，後續 phase 只使用
+鎖存值。`tb/Block_cic_r250_edge_tb.sv` 以 R=250 並刻意在兩個 phase 間翻轉
+M_DATA，修正版仍與傳統 CIC2 32/32 samples bit-exact；完整 `Top_tb.sv` 亦通過。
+
+修正版 post-route：68 slices、147 LUT、129 FF、49 RAMB36；WNS 2.325 ns、
+WHS 0.101 ns，timing 通過、DRC 0 errors。
+
+注意：舊 `tb/Block_cic_equiv_tb.sv` 只測 R=8，且 phase 間保持輸入不變，所以
+先前「block-form 已完全驗證」的結論不完整。
+
+## 已做過的嘗試與結論
+
+以下紀錄要保留，避免後續重做同樣的實驗：
+
+### 音訊與濾波
+
+- 單級 boxcar：面積小，但通帶 droop 與高頻 PDM noise 抑制不足；提高增益後
+  真實雜音很大，已淘汰，最後固定選 CIC2。
+- 相鄰 PCM sample 相減去 DC：會放大高頻雜音，已移除。
+- boxcar + 64x + 簡單飽和：曾完全無錄音聲，推測輸入/DC 長時間頂住上下限。
+- CIC2 + 64x + 飽和：同樣沒有聲音，已移除飽和；不能把飽和當作除噪方法。
+- 提高數位錄音增益會連同麥克風類比底噪一起放大，不能改善原始 SNR。
+
+### CIC2 實作
+
+- 傳統 2-integrator + 2-comb：作為數學／音質基準，封存 bitstream 為
+  `build/preserved/NEXYS_A7_parallel_cic2_20261025.bit`。
+- 序列化／共享 add-sub：R=250、64/64 samples 與傳統 CIC2 bit-exact，完整功能
+  regression 通過；結果為 64 slices、131 LUT、141 FF。保留作已完成實驗，
+  目前板上並未使用。其原始碼目前在 `Top.sv`。
+- 原始 block-form：68 slices、146 LUT、128 FF，但有重複讀 live `M_DATA` 的
+  硬體時序問題，只保留在 `Top_7bit_backup_20261025.sv` 供追查，不要再燒。
+- 修正後 block-form：目前板上採用版本，結果見上一節。
+- comb 提前截位為 79 slices、解除 BRAM bank hierarchy 為 87 slices，兩者皆使
+  post-route occupied slices 變差，未採用。
+- 曾參考 Matrix Creator 的多聲道 CIC3 時分共用、`kazkojima/pdmmic-example` 的
+  CIC + half-band/FIR，以及 TinyQV 的固定 64x CIC；乘法器／FIR 路線不符合目前
+  slice 面積目標，時分共用概念則已在上述序列化實驗驗證，不直接移植。
+
+### Speed mode 面積實驗
+
+- 原 15-mode counter：71 slices，且速度順序維持 `1x..8x, 1/2x..1/8x`，採用。
+- 16-state slow-first 74 slices、fast-first 73、slow down-counter 80，未採用。
+- 15-state LFSR 為 72 slices；合併 address carry chain 可到 71，但順序雜亂；
+  改 down-counter 則為 77，未採用。
+- LUT 較少不代表 slice 較少：16-state 版雖只有 156 LUT，但 O5/O6 配對下降，
+  最後需要 74 slices。
+- 基準報告：`tmp/full_pdm_div_reports/counter_utilization.rpt`；相關實驗腳本：
+  `tmp/run_reordered_explore.tcl`。
+
+### PDM clock、SRL 與記憶體
+
+- 兩個未約束的 SRLC32E one-hot ring 會被放到兩個 SliceM，完整設計 72 slices。
+- 兩個 SRL 加相同 `RLOC` 並指定 A6LUT/B6LUT 後為 70 slices。
+- 最終改成單一 SRLC32E：Q15/Q31 產生 M_CLK 兩個邊緣，Q31 同時作每 32 clocks
+  一次的 `pdm_ce`；SRL、toggle LUT、M_CLK FF 打包於同一 movable SliceM。
+- `tb/Pdm_one_srl_clock_tb.sv` 已驗證 /32、50% duty 與下降沿 CE。
+- 2-bit `read_pending` 改成 SRL 會用 1 LUT 換 2 FF，沒有 slice 優勢。
+- 200Kx7 錄音陣列必須保留 BRAM；CIC state 若硬塞多讀埠 LUTRAM 會複製記憶體。
+- 記憶體控制曾移除冗餘 bank-range comparator 與 `read_bank`。
+
+三個前面未記錄過的突變；只保留 post-route 真正較好的第一個：
+
+1. **窄 block accumulator 與寬共享 ALU 並行（採用）**：`pdm_ce` 當拍同時更新
+   9-bit block sum 與 reverse weighted sum，下一拍才以共享寬 ALU 更新 forward sum。
+   因兩條路都只在 `pdm_ce` 取 `M_DATA`，不存在舊版跨 phase 重讀 pin 的問題。
+   bounded triangular state 另外依 `R*(R+1)/2` 宣告最小安全寬度；單獨縮寬不改
+   post-route，真正改善來自取消原本 block-sum 佔用的寬 ALU phase／mux arm。
+2. **把 `cic_emit` 摺進 phase encoding（淘汰）**：少 1 FF，但多一個寬資料路徑
+   control case，結果 67 slices、153 LUT、127 FF，比採用版差。
+3. **先算窄 signed weight，再改成二輸入寬加法（淘汰）**：功能正確，但負權重
+   前處理破壞 LUT/FF packing，結果 72 slices、150 LUT、128 FF。
+
+採用版 `Top_block_form_fixed.sv` 驗證結果：
+
+- `Block_cic_r250_edge_tb.sv`：R=250、phase 間翻轉 `M_DATA`，與傳統 CIC2
+  32/32 samples bit-exact，PASS。
+- `Top_tb.sv`：record、auto-play、15-speed、pause/resume，PASS。
+- post-route：**66 slices、142 LUT、128 FF、49 RAMB36**；相較原 fixed block-form
+  的 68/147/129，少 2 slices、5 LUT、1 FF。
+- timing：WNS 2.068 ns、WHS 0.086 ns，全部 constraints 通過；DRC 0 checks。
+- 最新 bitstream 已重建於
+  `build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`，但本輪未執行
+  `program_device.tcl`，所以板上仍是先前燒錄的 68-slice fixed 版本，除非之後另行燒錄。
+
+## 檔案與燒錄注意事項
+
+- `Top_block_form_fixed.sv`：目前板上版本的來源。
+- `Top.sv`：序列化 CIC2 實驗版本，不是目前板上 bitstream 的來源。
+- `Top_7bit_backup_20261025.sv`：有 live-M_DATA 問題的原 block-form 備份。
+- `build/preserved/NEXYS_A7_56slice.bit`：功能與目前按鍵／錄放音版本不同，不可
+  只看檔名或 slice 數就燒錄。
+- 舊 handoff 所記的 15:34 `build/vivado/.../NEXYS_A7.bit` 已被後續實驗取代，
+  不能當作目前 block-form 版本。
+
+建置、燒錄目前 fixed block-form：
+
+```powershell
+& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source .\tmp\run_block_form_fixed.tcl
+& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source .\program_device.tcl -tclargs block_fixed
+```
+
+修改後必須查看對應 build 的 post-route utilization／timing／DRC，不可用 synthesis
+estimate 或不明 bitstream 檔名推測 slice 數；CIC 多週期運算不得在後續 phase
+重新讀取實體 `M_DATA` pin。
