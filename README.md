@@ -1,5 +1,7 @@
-# FPGA_LAB3
-搬到ddram -> 我是在bram 做 -> bonus用dram
+10/25
+做完高階突變
+正在低階flow當中
+完整資訊在handoff.md
 
 bonus
 可以錄多段 混著撥出(按鈕設置要哪幾段撥出)
