@@ -67,8 +67,42 @@ module Top #(
         // so bank_select can never name one of the unused binary codes.
         if (mem_we || mem_re)
             bank_enable[bank_select] = 1'b1;
-        mem_rdata = bank_dout[bank_select];
     end
+
+    // Pack the normal seven-bank read mux into dedicated slice mux resources.
+    // Each half is a four-input data mux that fits one LUT6 per audio bit;
+    // MUXF7 then selects the low/high bank group with bank_select[2].  This
+    // keeps the existing latency and arithmetic while avoiding a scattered
+    // second LUT level near the individual BRAM columns.
+    generate
+        if (BANKS == 7) begin : gen_muxf7_read_select
+            logic [AUDIO_W-1:0] bank_mux_low, bank_mux_high;
+            always_comb begin
+                case (bank_select[1:0])
+                    2'd0: bank_mux_low = bank_dout[0];
+                    2'd1: bank_mux_low = bank_dout[1];
+                    2'd2: bank_mux_low = bank_dout[2];
+                    default: bank_mux_low = bank_dout[3];
+                endcase
+                case (bank_select[1:0])
+                    2'd0: bank_mux_high = bank_dout[4];
+                    2'd1: bank_mux_high = bank_dout[5];
+                    2'd2: bank_mux_high = bank_dout[6];
+                    default: bank_mux_high = '0;
+                endcase
+            end
+            for (genvar mux_bit = 0; mux_bit < AUDIO_W; mux_bit = mux_bit + 1) begin : gen_bit
+                MUXF7 read_mux (
+                    .I0(bank_mux_low[mux_bit]),
+                    .I1(bank_mux_high[mux_bit]),
+                    .S(bank_select[2]),
+                    .O(mem_rdata[mux_bit])
+                );
+            end
+        end else begin : gen_generic_read_select
+            always_comb mem_rdata = bank_dout[bank_select];
+        end
+    endgenerate
 
     genvar bank_i;
     generate
@@ -202,16 +236,23 @@ module Top #(
     // sample address.  Fast modes skip 1..8 addresses per output frame;
     // slow modes use a 3-bit exact modulo-2..8 divider and repeat samples.
     // This avoids a wide fractional phase accumulator and its step ROM.
-    logic [ADDR_W-1:0] sample_addr = '0;
+    // mem_addr is also the logical record/playback cursor.  Keeping a second
+    // 18-bit sample_addr register duplicated both the counter and its next-
+    // state decode.  Retain this alias for simulation/debug visibility only.
+    wire [ADDR_W-1:0] sample_addr = mem_addr;
     logic [2:0] slow_count = '0;
     logic [2:0] slow_terminal;
     logic [3:0] advance;
     logic [ADDR_W:0] address_sum;
 
     always_comb begin
-        advance = (speed_mode < 4'd8) ? (speed_mode + 1'b1) : 4'd1;
+        // Record and playback are mutually exclusive, so the same wide adder
+        // handles record +1 and playback +1..8 instead of synthesizing two
+        // separate address carry chains.
+        advance = (state == S_RECORD) ? 4'd1 :
+                  ((speed_mode < 4'd8) ? (speed_mode + 1'b1) : 4'd1);
         slow_terminal = speed_mode[2:0] + 1'b1;
-        address_sum = {1'b0, sample_addr} + {{(ADDR_W-3){1'b0}}, advance};
+        address_sum = {1'b0, mem_addr} + {{(ADDR_W-3){1'b0}}, advance};
     end
 
     // The inferred BRAM has one registered read cycle. The extra pending
@@ -269,7 +310,7 @@ module Top #(
                 mem_we         <= 1'b0;
                 mem_re         <= 1'b0;
                 state         <= S_RECORD;
-                sample_addr   <= '0;
+                mem_addr      <= '0;
                 decim_count   <= '0;
                 cic_block_sum    <= '0;
                 cic_forward_sum  <= '0;
@@ -281,6 +322,11 @@ module Top #(
             end else begin
                 case (state)
                     S_RECORD: begin
+                        // The bank consumes the old address on the cycle after
+                        // mem_we is asserted.  Advance the shared cursor only
+                        // after that write has taken place.
+                        if (mem_we)
+                            mem_addr <= address_sum[ADDR_W-1:0];
                         case (cic_phase)
                             2'd0: if (pdm_ce) begin
                                 cic_reverse_sum <= cic_alu_result;
@@ -301,18 +347,14 @@ module Top #(
                                 cic_block_sum   <= '0;
                                 cic_forward_sum <= '0;
                                 cic_reverse_sum <= '0;
-                                mem_addr    <= sample_addr;
                                 mem_wdata   <= encode_sample(
                                     cic_to_pcm(cic_alu_result)
                                 );
                                 mem_we      <= 1'b1;
                                 cic_phase   <= 2'd0;
-                                if (sample_addr == LAST_ADDR) begin
+                                if (mem_addr == LAST_ADDR) begin
                                     state      <= S_PRIME;
-                                    sample_addr <= '0;
                                     slow_count <= '0;
-                                end else begin
-                                    sample_addr <= sample_addr + 1'b1;
                                 end
                             end
                         endcase
@@ -340,10 +382,8 @@ module Top #(
                                             // advance is at most eight.  A crossing can
                                             // therefore only wrap to address 0..7; its
                                             // low three sum bits are the exact result.
-                                            sample_addr <= {{(ADDR_W-3){1'b0}}, address_sum[2:0]};
                                             mem_addr  <= {{(ADDR_W-3){1'b0}}, address_sum[2:0]};
                                         end else begin
-                                            sample_addr <= address_sum[ADDR_W-1:0];
                                             mem_addr  <= address_sum[ADDR_W-1:0];
                                         end
                                         mem_re <= 1'b1;
@@ -389,3 +429,4 @@ module PcmBramBank #(
         end
     end
 endmodule
+
