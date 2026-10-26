@@ -1,138 +1,188 @@
-# Lab3 handoff（2026-10-25）
+# Lab3 handoff（最後整理：2026-10-26）
 
-## 目前狀態
+## handoff 維護規則
 
-- 板子：Nexys A7-100T（xc7a100t），工具：Vivado 2026.1。
-- 目前板上燒錄的是修正後的 block-form CIC2：
+每次更新本檔時，必須先整理全文：刪除已被新結果取代、重複、失效或不影響交接的
+內容，再寫入目前狀態。禁止只在檔尾持續追加紀錄。歷史實驗只保留足以避免重做的
+結論；所有數字以目前有效的 post-route report 為準。
+
+## 目前唯一有效狀態
+
+- 板子／工具：Nexys A7-100T（xc7a100t）、Vivado 2026.1。
+- 正式 RTL：`Top_block_form_fixed.sv`；top wrapper：`NEXYS_A7.sv`。
+- 正式 bitstream：
   `build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`。
-- 對應原始碼：`Top_block_form_fixed.sv`。
-- PDM：3.125 MHz，250 倍降採樣，PCM 12.5 ksample/s。
-- 儲存：200,000 samples，7 個 32K x 7 BRAM bank。
-- DAC：100 MHz、7-bit 一階 sigma-delta；`AUD_PWM` 只拉低或 high-Z。
-- 錄音、自動播放、15 段速度、pause/resume 均已通過 regression。
+- 正式 routed DCP：
+  `build/reports/block_form_fixed/post_route_best47.dcp`。
+- 正式 reports：`build/reports/block_form_fixed/`。
+- 最新 post-route：**47 slices、115 LUT、110 FF、7 MUXF7、49 RAMB36**；
+  WNS 2.636 ns、WHS 0.109 ns，timing 通過，DRC checks found = 0。
+- `low-level-route-20261026-r1` 與 `low-level-route-20261026-r2` 兩輪
+  implementation-only DSE 均未找到更小候選，因此正式 RTL、DCP、bitstream 維持
+  47-slice 版本。r2 的 normal-PSIP 完整 re-place 三次皆為 54 slices；保留 placement
+  的三種 reroute 皆維持 47 slices，但 WNS 退到 2.379 ns。完整結果與 snapshot 位於
+  `archive/low-level-route-20261026-r1/round-001/` 與
+  `archive/low-level-route-20261026-r2/round-001/`。
+- 2026-10-26 19:43（Asia/Taipei）已用 `program_device.tcl -tclargs block_fixed`
+  將最新 47-slice bitstream 燒錄至 Digilent target `210292BF6D74A` 的 xc7a100t；
+  Vivado 回報 startup status `HIGH`，批次流程正常結束。
+- 舊 50-slice bitstream 已保存為
+  `build/preserved/NEXYS_A7_50slice_block_form_20261026.bit`；舊 50／64-slice routed
+  DCP 分別仍為 `post_route_best50.dcp`／`post_route_best64.dcp`。
 
-### 已固定、不再任意更改的規格
+## 不可任意改動的規格
 
-- 濾波器選擇固定為 **CIC2**。
-- 錄音增益固定為 **64x**。
-- PCM／BRAM／DAC 固定為 **signed 7-bit**。
+- 濾波器固定 **CIC2**；內部實作可最佳化，但輸出數學意義必須維持 CIC2。
+- PDM 3.125 MHz、`DECIMATION=250`、PCM 12.5 ksample/s。
+- 錄音增益固定 **64x**。
+- PCM／BRAM／DAC 固定 **signed 7-bit**。
+- 儲存 200,000 samples，7 個 32K x 7 BRAM bank。
+- DAC 為 100 MHz、7-bit 一階 sigma-delta；`AUD_PWM` 只拉低或 high-Z。
+- 64x 是把 CIC 正規化右移量減少 6 bits；不做飽和，溢位維持二補數回繞。
+- 必須保留 record、auto-play、15-speed、pause/resume 行為與速度順序
+  `1x..8x, 1/2x..1/8x`。
 
-CIC2 的內部演算法架構仍可最佳化，但輸出數學意義必須維持 CIC2，並用
-`DECIMATION=250` 與實際 PDM pin 更新時序驗證。不要因面積實驗改成 boxcar、
-CIC3 或 FIR，也不要改掉 64x、7-bit。
+## 關鍵硬體正確性條件
 
-目前 64x 是將 CIC 正規化右移量減少 6 bits；沒有飽和限制，取位後直接成為
-signed 7-bit，超出範圍會二補數回繞。
+舊 block-form 曾在 phase 0 與 phase 1 重複讀 live `M_DATA`，實體麥克風可能在兩個
+phase 間更新，造成同一 sample 吃到不同 bit。現在的設計只在 `pdm_ce` 取樣一次；
+任何 CIC 多週期重構都不得在後續 phase 再讀實體 pin。
 
-## 本次 block-form 修正
+目前採用窄 block accumulator 與寬共享 ALU 並行：`pdm_ce` 當拍更新 9-bit block
+sum 與 reverse weighted sum，下一拍用共享寬 ALU 更新 forward sum。這是目前已驗證
+且面積較好的 block-form 結構。
 
-原 block-form 數學式本身與傳統 CIC2 等價，但 RTL 在 phase 0 使用一次 live
-`M_DATA`，10 ns 後的 phase 1 又讀一次 live `M_DATA`。實體麥克風可能在 clock
-edge 後更新資料，造成同一筆 PDM sample 的兩段運算吃到不同 bit，因此實聽音量
-變小、音質變差。
+錄音與播放現在只保留一份 18-bit `mem_addr`，它同時是邏輯 sample cursor；不再另存
+一份 `sample_addr`。錄音 `+1` 與播放 `+1..8` 也因兩種狀態互斥而共用同一條寬位址
+ALU。BRAM 在 `mem_we` 拉高後的下一拍使用舊位址完成寫入，再推進共享 cursor；這個
+時序不可在後續重構中破壞。
 
-`Top_block_form_fixed.sv` 已改為在 `pdm_ce` 鎖存 `M_DATA`，後續 phase 只使用
-鎖存值。`tb/Block_cic_r250_edge_tb.sv` 以 R=250 並刻意在兩個 phase 間翻轉
-M_DATA，修正版仍與傳統 CIC2 32/32 samples bit-exact；完整 `Top_tb.sv` 亦通過。
+7-bank BRAM read mux 已改成每個 audio bit 兩個 LUT6 加一個 dedicated `MUXF7`：兩個
+LUT6 各做低／高四選一，`MUXF7` 用 bank-select MSB 合併。這不增加 latency 或 state，
+把原先散在 13 個 slice sites 的 read cone 壓到 7 個 read-mux/`pcm_current` sites。
+只有正常的 `BANKS==7` 組態使用這條路；其他參數組態仍走 generic array select。
 
-修正版 post-route：68 slices、147 LUT、129 FF、49 RAMB36；WNS 2.325 ns、
-WHS 0.101 ns，timing 通過、DRC 0 errors。
+## 必須維持的驗證
 
-注意：舊 `tb/Block_cic_equiv_tb.sv` 只測 R=8，且 phase 間保持輸入不變，所以
-先前「block-form 已完全驗證」的結論不完整。
+- `tb/Block_cic_r250_edge_tb.sv`：R=250，刻意在 phase 間翻轉 `M_DATA`；目前
+  32/32 samples 與傳統 CIC2 bit-exact，PASS。
+- `tb/Top_tb.sv`：record、auto-play、15-speed、pause/resume，PASS。
+- `tmp/Muxf_read_select_tb.sv`：逐一檢查 7 個 bank 的 explicit MUXF7 read selector，
+  PASS。這是本輪新增的聚焦測試；前兩項仍是每次改 RTL 必跑的正式 regression。
+- 修改 RTL 後必須重跑以上兩項，且查看 post-route utilization、timing、DRC；
+  不可用 synthesis estimate 或 bitstream 檔名推測 slice 數。
 
-## 已做過的嘗試與結論
+Vivado GUI wrapper 若在 Windows 報 `compile.bat` spawn failed，可直接使用同版的
+`xvlog.bat`、`xelab.bat`、`xsim.bat`；本輪三項測試已用此方式重跑通過。
 
-以下紀錄要保留，避免後續重做同樣的實驗：
+## 正式 build flow
 
-### 音訊與濾波
+Vivado 2026.1 對此小設計的單次 strategy run 有明顯 QoR 漂移；表面相同的 directive
+單跑曾得到 70 slices。因此 `tmp/run_block_form_fixed.tcl` 不能退回單次 project run。
+它會 sweep `control_set_opt_threshold` 1／4／8／16／auto，確認 timing 與 DRC，解析
+post-route occupied slices，再提升合格結果中最小的 DCP 與 bitstream。
 
-- 單級 boxcar：面積小，但通帶 droop 與高頻 PDM noise 抑制不足；提高增益後
-  真實雜音很大，已淘汰，最後固定選 CIC2。
-- 相鄰 PCM sample 相減去 DC：會放大高頻雜音，已移除。
-- boxcar + 64x + 簡單飽和：曾完全無錄音聲，推測輸入/DC 長時間頂住上下限。
-- CIC2 + 64x + 飽和：同樣沒有聲音，已移除飽和；不能把飽和當作除噪方法。
-- 提高數位錄音增益會連同麥克風類比底噪一起放大，不能改善原始 SNR。
+目前 MUXF7 版本的 sweep：
 
-### CIC2 實作
+| threshold | slices | LUT | FF | control sets | WNS | WHS |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | **47** | 115 | 110 | 14 | 2.636 ns | 0.109 ns |
+| 4 | 51 | 136 | 110 | 10 | 1.602 ns | 0.062 ns |
+| 8 | 51 | 130 | 110 | 8 | 3.142 ns | 0.095 ns |
+| 16 | 52 | 159 | 110 | 5 | 3.352 ns | 0.112 ns |
+| auto | 54 | 129 | 110 | 13 | 3.249 ns | 0.157 ns |
 
-- 傳統 2-integrator + 2-comb：作為數學／音質基準，封存 bitstream 為
-  `build/preserved/NEXYS_A7_parallel_cic2_20261025.bit`。
-- 序列化／共享 add-sub：R=250、64/64 samples 與傳統 CIC2 bit-exact，完整功能
-  regression 通過；結果為 64 slices、131 LUT、141 FF。保留作已完成實驗，
-  目前板上並未使用。其原始碼目前在 `Top.sv`。
-- 原始 block-form：68 slices、146 LUT、128 FF，但有重複讀 live `M_DATA` 的
-  硬體時序問題，只保留在 `Top_7bit_backup_20261025.sv` 供追查，不要再燒。
-- 修正後 block-form：目前板上採用版本，結果見上一節。
-- comb 提前截位為 79 slices、解除 BRAM bank hierarchy 為 87 slices，兩者皆使
-  post-route occupied slices 變差，未採用。
-- 曾參考 Matrix Creator 的多聲道 CIC3 時分共用、`kazkojima/pdmmic-example` 的
-  CIC + half-band/FIR，以及 TinyQV 的固定 64x CIC；乘法器／FIR 路線不符合目前
-  slice 面積目標，時分共用概念則已在上述序列化實驗驗證，不直接移植。
+前一輪先用 64-slice DCP 證明重複位址 state 是主要成本：合併兩份 18-bit 位址 register
+後得到 58 slices，再共用錄音／播放 address ALU，使 CARRY4 由 17 降到 12，得到
+50 slices。本輪再對 50-slice DCP 解剖，證明 7-bit BRAM read mux 雖只有約 15 LUT，
+卻因兩層 LUT mux 分散到 13 個 sites。implementation-only placer sweep 的
+Default／Explore／ExtraPostPlacementOpt／WLDrivenBlockPlacement 都維持 50 slices，
+AltSpreadLogic_low 更差為 56；因此才改用 7 個 explicit MUXF7，最後得到 47 slices。
+兩輪都遵守先取得 routed 證據、再改 RTL。
 
-### Speed mode 面積實驗
+47-slice DCP 的後續低階 round 先解剖 fanout／congestion，再從相同 immutable DCP
+重做 placement／route。`record_press` fanout 83 的相關最差 slack 為 6.174 ns，
+`cic_phase[1]` fanout 57 的相關最差 slack 為 4.538 ns；被查網路都在同一 clock
+region，`report_design_analysis` 沒有 level > 5 congestion，因此沒有理由為面積目標
+強制 replication。關閉 placer PSIP 後，Explore + MoreGlobalIterations 與
+Default/high-net-delay + NoTimingRelaxation 都是 53 slices、132 LUT、110 FF、49 RAMB36、
+14 control sets；前者 WNS/WHS 1.913/0.141 ns，後者為 1.693/0.141 ns，兩者 DRC 0。
+route directive 只改 timing，沒有省 slice；PSIP/LUT combining 對目前 47-slice packing
+是有利的。Vivado 2026.1 也拒絕在 post-route `phys_opt_design` 做
+`-force_replication_on_nets`；若未來仍要測 replication，必須從 post-place/pre-route
+或更早階段開始。
 
-- 原 15-mode counter：71 slices，且速度順序維持 `1x..8x, 1/2x..1/8x`，採用。
-- 16-state slow-first 74 slices、fast-first 73、slow down-counter 80，未採用。
-- 15-state LFSR 為 72 slices；合併 address carry chain 可到 71，但順序雜亂；
-  改 down-counter 則為 77，未採用。
-- LUT 較少不代表 slice 較少：16-state 版雖只有 156 LUT，但 O5/O6 配對下降，
-  最後需要 74 slices。
-- 基準報告：`tmp/full_pdm_div_reports/counter_utilization.rpt`；相關實驗腳本：
-  `tmp/run_reordered_explore.tcl`。
+第二輪低階 sweep 補測 MUXF7 版本尚未跑過的 normal-PSIP 完整 re-place：Default、
+Explore + MoreGlobalIterations、Explore/medium net-delay-weight + AggressiveExplore 三個
+合法組合全部得到 54 slices、117 LUT、110 FF、49 RAMB36、14 control sets；WNS
+分別為 3.448／3.410／3.448 ns，WHS 都是 0.017 ns，DRC 0、無 unrouted nets。
+同一輪保留原 47-slice placement，只做 Explore、AggressiveExplore、
+MoreGlobalIterations + TNS cleanup 三種 reroute，三者都是 47 slices、115 LUT、110 FF、
+49 RAMB36、14 control sets，WNS/WHS 均為 2.379/0.109 ns；面積相同但 timing 比正式
+parent 差，因此不提升。CIC locality 分支想固定非 CIC placement、局部重排 84 個 CIC
+primitives，但三次都因 Vivado Tcl 不支援 `remove_from_collection` 而在 placement 前停止；
+這只是 flow/infrastructure 結果，不能據此判定 CIC RTL 昂貴或需要改寫。
 
-### PDM clock、SRL 與記憶體
+最新 47-slice DCP 的非加總 site footprint：CIC 19 sites／2 CARRY4，memory control
+12 sites／5 CARRY4，DAC/read mux 9 sites／2 CARRY4；read-mux/`pcm_current` 本身為
+7 sites。細節在 `build/reports/block_form_fixed/detail/` 與 `memory_mux_detail/`。
+設計沒有 unrouted nets；目前不要盲目加
+`MAX_FANOUT`、register replication 或 BRAM output register，因 timing 已有充足裕量，
+而目標是 occupied slices。
 
-- 兩個未約束的 SRLC32E one-hot ring 會被放到兩個 SliceM，完整設計 72 slices。
-- 兩個 SRL 加相同 `RLOC` 並指定 A6LUT/B6LUT 後為 70 slices。
-- 最終改成單一 SRLC32E：Q15/Q31 產生 M_CLK 兩個邊緣，Q31 同時作每 32 clocks
-  一次的 `pdm_ce`；SRL、toggle LUT、M_CLK FF 打包於同一 movable SliceM。
-- `tb/Pdm_one_srl_clock_tb.sv` 已驗證 /32、50% duty 與下降沿 CE。
-- 2-bit `read_pending` 改成 SRL 會用 1 LUT 換 2 FF，沒有 slice 優勢。
-- 200Kx7 錄音陣列必須保留 BRAM；CIC state 若硬塞多讀埠 LUTRAM 會複製記憶體。
-- 記憶體控制曾移除冗餘 bank-range comparator 與 `read_bank`。
-
-三個前面未記錄過的突變；只保留 post-route 真正較好的第一個：
-
-1. **窄 block accumulator 與寬共享 ALU 並行（採用）**：`pdm_ce` 當拍同時更新
-   9-bit block sum 與 reverse weighted sum，下一拍才以共享寬 ALU 更新 forward sum。
-   因兩條路都只在 `pdm_ce` 取 `M_DATA`，不存在舊版跨 phase 重讀 pin 的問題。
-   bounded triangular state 另外依 `R*(R+1)/2` 宣告最小安全寬度；單獨縮寬不改
-   post-route，真正改善來自取消原本 block-sum 佔用的寬 ALU phase／mux arm。
-2. **把 `cic_emit` 摺進 phase encoding（淘汰）**：少 1 FF，但多一個寬資料路徑
-   control case，結果 67 slices、153 LUT、127 FF，比採用版差。
-3. **先算窄 signed weight，再改成二輸入寬加法（淘汰）**：功能正確，但負權重
-   前處理破壞 LUT/FF packing，結果 72 slices、150 LUT、128 FF。
-
-採用版 `Top_block_form_fixed.sv` 驗證結果：
-
-- `Block_cic_r250_edge_tb.sv`：R=250、phase 間翻轉 `M_DATA`，與傳統 CIC2
-  32/32 samples bit-exact，PASS。
-- `Top_tb.sv`：record、auto-play、15-speed、pause/resume，PASS。
-- post-route：**66 slices、142 LUT、128 FF、49 RAMB36**；相較原 fixed block-form
-  的 68/147/129，少 2 slices、5 LUT、1 FF。
-- timing：WNS 2.068 ns、WHS 0.086 ns，全部 constraints 通過；DRC 0 checks。
-- 最新 bitstream 已重建於
-  `build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`，但本輪未執行
-  `program_device.tcl`，所以板上仍是先前燒錄的 68-slice fixed 版本，除非之後另行燒錄。
-
-## 檔案與燒錄注意事項
-
-- `Top_block_form_fixed.sv`：目前板上版本的來源。
-- `Top.sv`：序列化 CIC2 實驗版本，不是目前板上 bitstream 的來源。
-- `Top_7bit_backup_20261025.sv`：有 live-M_DATA 問題的原 block-form 備份。
-- `build/preserved/NEXYS_A7_56slice.bit`：功能與目前按鍵／錄放音版本不同，不可
-  只看檔名或 slice 數就燒錄。
-- 舊 handoff 所記的 15:34 `build/vivado/.../NEXYS_A7.bit` 已被後續實驗取代，
-  不能當作目前 block-form 版本。
-
-建置、燒錄目前 fixed block-form：
+重建：
 
 ```powershell
 & 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source .\tmp\run_block_form_fixed.tcl
+```
+
+燒錄最新 fixed block-form：
+
+```powershell
 & 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source .\program_device.tcl -tclargs block_fixed
 ```
 
-修改後必須查看對應 build 的 post-route utilization／timing／DRC，不可用 synthesis
-estimate 或不明 bitstream 檔名推測 slice 數；CIC 多週期運算不得在後續 phase
-重新讀取實體 `M_DATA` pin。
+## 已排除的路線（只保留避免重做所需資訊）
+
+- boxcar、CIC3、FIR：不符合目前已固定的 CIC2／音質／面積目標。
+- PCM 相鄰 sample 相減去 DC：放大高頻雜音。
+- boxcar 或 CIC2 後加簡單飽和：實機曾無聲；不能拿飽和當除噪方法。
+- 提高數位增益：類比底噪一起放大，不能改善原始 SNR。
+- 傳統 2-integrator + 2-comb：只作數學／音質基準；封存於
+  `build/preserved/NEXYS_A7_parallel_cic2_20261025.bit`。
+- 序列化共享 add-sub：功能正確但不是現行版本；原始碼在 `Top.sv`，封存 bitstream
+  為 `build/preserved/NEXYS_A7_serialized_cic2_20261025.bit`。
+- `Top_7bit_backup_20261025.sv`：含 live-`M_DATA` 問題，只供追查，禁止燒錄。
+- comb 提前截位、解除 BRAM bank hierarchy、`cic_emit` 摺入 phase、窄 signed
+  weight 前處理、read_pending 改 SRL：實測 occupied slices 都更差。
+- 保留獨立 `sample_addr`／`mem_addr` 以及兩條位址加法器：已被 50-slice 共享位址／
+  共享 address-ALU 版本取代；舊正式結果為 64 slices。
+- 單靠 placer directive 解決 read-mux packing：Default／Explore／ExtraPostPlacementOpt／
+  WLDrivenBlockPlacement 都是 50 slices，AltSpreadLogic_low 為 56，未勝過 explicit MUXF7。
+- 從 47-slice DCP 關閉 PSIP 再重做 placement／route：兩個合法組合都退化到
+  53 slices／132 LUT；不要把 `-no_psip` 當成面積最佳化。
+- 對 routed DCP 直接做 forced fanout replication：Vivado 不允許；而目前高 fanout
+  控制網路 slack 與 congestion 證據也不支持複製。
+- 對 47-slice MUXF7 DCP 做 normal-PSIP 完整 re-place：三個合法組合都退化到
+  54 slices／117 LUT；route-only 三種 directive 雖保住 47 slices，WNS 都退到
+  2.379 ns，沒有 Pareto 改善。
+- speed-mode 16-state／LFSR／down-counter 變體：未勝過目前 counter，且有順序或
+  packing 缺點。
+- `build/preserved/NEXYS_A7_56slice.bit` 功能不同，不可因 slice 數較小就燒錄。
+
+## 下一步判斷原則
+
+先以 routed hierarchy、control sets、fanout、packing 與 timing 報告證明某個結構昂貴，
+再改 RTL。LUT 較少不等於 slice 較少；所有候選都必須用相同功能測試與完整 post-route
+結果比較。目前 flow 已由 64 降到 47 slices。read mux 已壓到每個 audio bit 一個
+slice，暫時不要再重寫記憶體或解除 bank hierarchy（後者已知更差）。route-only 與
+高 fanout replication 路線目前都沒有省面積的證據；下一個較大的非加總 footprint
+仍是 CIC 19 sites／2 CARRY4。若繼續，應先從 47-slice DCP 做 CIC register/LUT/CARRY4
+逐 site packing、control-set 相容性與 fan-in/fan-out cone 解剖，再決定是否有可證明的
+共享 ALU／phase-control 局部重寫機會；不要因 LUT 數看起來高就直接改數學結構。
+若重做 CIC locality physical experiment，先把 Tcl collection subtraction 改成 Vivado
+支援的 `filter` 或明確 list 差集，並用新的有限 attempt budget；本輪沒有留下任何可比較
+routed locality candidate，禁止把它當 RTL 修改依據。
+`report_qor_assessment` 與
+`report_qor_suggestions` 在目前 Vivado BASIC license 不可用；其餘 methodology、route、
+hierarchy、primitive、packing 報告已產生。
