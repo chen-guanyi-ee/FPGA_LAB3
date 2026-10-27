@@ -1,4 +1,4 @@
-# Lab3 handoff（最後整理：2026-10-26）
+# Lab3 handoff（最後整理：2026-10-27）
 
 ## handoff 維護規則
 
@@ -17,12 +17,14 @@
 - 正式 reports：`build/reports/block_form_fixed/`。
 - 最新 post-route：**47 slices、115 LUT、110 FF、7 MUXF7、49 RAMB36**；
   WNS 2.636 ns、WHS 0.109 ns，timing 通過，DRC checks found = 0。
-- `low-level-route-20261026-r1` 與 `low-level-route-20261026-r2` 兩輪
-  implementation-only DSE 均未找到更小候選，因此正式 RTL、DCP、bitstream 維持
-  47-slice 版本。r2 的 normal-PSIP 完整 re-place 三次皆為 54 slices；保留 placement
-  的三種 reroute 皆維持 47 slices，但 WNS 退到 2.379 ns。完整結果與 snapshot 位於
-  `archive/low-level-route-20261026-r1/round-001/` 與
-  `archive/low-level-route-20261026-r2/round-001/`。
+- `low-level-route-20261026-r1`、`low-level-route-20261026-r2` 與
+  `low-level-route-20261027-r3` 三輪 implementation-only DSE 均未找到小於 47 slices 的
+  候選，因此正式 RTL、DCP、bitstream 維持 47-slice 版本。r3 已修復 CIC locality Tcl：
+  完整 CIC cone 三次局部重排為 50／50／48 slices；selective CIC FF 重排為
+  48／47／47 slices，最佳者與 parent 完全相同而非改善。完整結果與 immutable snapshot
+  分別位於 `archive/low-level-route-20261026-r1/round-001/`、
+  `archive/low-level-route-20261026-r2/round-001/` 與
+  `archive/low-level-route-20261027-r3/round-001/`。
 - 2026-10-26 19:43（Asia/Taipei）已用 `program_device.tcl -tclargs block_fixed`
   將最新 47-slice bitstream 燒錄至 Digilent target `210292BF6D74A` 的 xc7a100t；
   Vivado 回報 startup status `HIGH`，批次流程正常結束。
@@ -119,9 +121,21 @@ Explore + MoreGlobalIterations、Explore/medium net-delay-weight + AggressiveExp
 同一輪保留原 47-slice placement，只做 Explore、AggressiveExplore、
 MoreGlobalIterations + TNS cleanup 三種 reroute，三者都是 47 slices、115 LUT、110 FF、
 49 RAMB36、14 control sets，WNS/WHS 均為 2.379/0.109 ns；面積相同但 timing 比正式
-parent 差，因此不提升。CIC locality 分支想固定非 CIC placement、局部重排 84 個 CIC
-primitives，但三次都因 Vivado Tcl 不支援 `remove_from_collection` 而在 placement 前停止；
-這只是 flow/infrastructure 結果，不能據此判定 CIC RTL 昂貴或需要改寫。
+  parent 差，因此不提升。當輪 CIC locality 分支曾因 Vivado Tcl 不支援
+  `remove_from_collection` 而在 placement 前停止；此 flow blocker 已在 r3 用明確 Tcl
+  list 差集修復，不能再把舊失敗當成 RTL 修改依據。
+
+第三輪低階 sweep 直接驗證 CIC locality 與 selective packing。固定 252 個非 CIC
+primitives、局部重排全部 84 個 CIC primitives 時，tight／relaxed pblock 都是
+50 slices、117 LUT；不設 pblock 的版本把具名 CIC footprint 從 19 sites 壓到 15 sites，
+但全設計仍為 48 slices、117 LUT、110 FF，WNS/WHS 2.636/0.121 ns。這證明局部 CIC
+site 數可下降，但外圍固定 LUT、control set 與 BEL 相容性會把成本轉移到其他 slice。
+selective 路線只移動 11 個 forward-sum FF 時為 48 slices；移動 11 個 previous-tail FF
+或全部 42 個 CIC datapath FF 時都為 47 slices。全部 datapath FF 的最佳候選為
+115 LUT、110 FF、49 RAMB36、14 control sets，WNS/WHS 2.636/0.109 ns，DRC 0、無
+unrouted nets，與 parent 完全相同，故不提升。另確認兩個 CIC singleton slice 存在，
+但三次把它們硬塞到選定 5FF BEL 都因 input mux 不可繞而被 Vivado 12-1409 拒絕；
+未來若做 direct placement，應用一般 AFF/BFF/CFF/DFF 或讓 placer 自選合法 BEL。
 
 最新 47-slice DCP 的非加總 site footprint：CIC 19 sites／2 CARRY4，memory control
 12 sites／5 CARRY4，DAC/read mux 9 sites／2 CARRY4；read-mux/`pcm_current` 本身為
@@ -166,6 +180,12 @@ primitives，但三次都因 Vivado Tcl 不支援 `remove_from_collection` 而�
 - 對 47-slice MUXF7 DCP 做 normal-PSIP 完整 re-place：三個合法組合都退化到
   54 slices／117 LUT；route-only 三種 directive 雖保住 47 slices，WNS 都退到
   2.379 ns，沒有 Pareto 改善。
+- 對完整 84-primitive CIC cone 做 locality re-place：具名 CIC footprint 最多可由
+  19 降到 15 sites，但總體最好仍是 48 slices／117 LUT；不要把局部 site 減少誤當成
+  全設計面積改善。
+- selective CIC FF re-place：11 個 forward-sum FF 為 48 slices；11 個 previous-tail FF
+  或 42 個 datapath FF 只能重現 47 slices，沒有 Pareto 改善。指定 5FF BEL 的 singleton
+  合併因 input mux 不可繞而失敗，不能重做相同 BEL 指派。
 - speed-mode 16-state／LFSR／down-counter 變體：未勝過目前 counter，且有順序或
   packing 缺點。
 - `build/preserved/NEXYS_A7_56slice.bit` 功能不同，不可因 slice 數較小就燒錄。
@@ -175,14 +195,21 @@ primitives，但三次都因 Vivado Tcl 不支援 `remove_from_collection` 而�
 先以 routed hierarchy、control sets、fanout、packing 與 timing 報告證明某個結構昂貴，
 再改 RTL。LUT 較少不等於 slice 較少；所有候選都必須用相同功能測試與完整 post-route
 結果比較。目前 flow 已由 64 降到 47 slices。read mux 已壓到每個 audio bit 一個
-slice，暫時不要再重寫記憶體或解除 bank hierarchy（後者已知更差）。route-only 與
-高 fanout replication 路線目前都沒有省面積的證據；下一個較大的非加總 footprint
-仍是 CIC 19 sites／2 CARRY4。若繼續，應先從 47-slice DCP 做 CIC register/LUT/CARRY4
-逐 site packing、control-set 相容性與 fan-in/fan-out cone 解剖，再決定是否有可證明的
-共享 ALU／phase-control 局部重寫機會；不要因 LUT 數看起來高就直接改數學結構。
-若重做 CIC locality physical experiment，先把 Tcl collection subtraction 改成 Vivado
-支援的 `filter` 或明確 list 差集，並用新的有限 attempt budget；本輪沒有留下任何可比較
-routed locality candidate，禁止把它當 RTL 修改依據。
-`report_qor_assessment` 與
-`report_qor_suggestions` 在目前 Vivado BASIC license 不可用；其餘 methodology、route、
-hierarchy、primitive、packing 報告已產生。
+slice，暫時不要再重寫記憶體或解除 bank hierarchy（後者已知更差）。route-only、
+高 fanout replication、完整 CIC locality 與 selective CIC-FF repacking 都已沒有省面積
+證據；目前 47 slices 應視為這組 RTL／約束／Vivado 版本下的實務收斂點。
+
+不建議再做一般性的 directive、seed、pblock 或 locality sweep；其邊際價值已很低，且三輪
+都未突破 47 slices。只有出現下列新證據時才值得再開一輪有限 flow：
+
+1. 從 parent DCP 找到可合法合併的普通 AFF/BFF/CFF/DFF singleton，並先證明其 LUT、
+   control set、clock-enable 與資料輸入 mux 相容；不得再指定已知不可繞的 5FF BEL。
+2. 新的 hierarchy／equivalence 分析能指出一個可 bit-exact 消除的 register、mux 或獨立
+   control set，而且預期至少釋放一個完整 occupied slice；此時才做最小 RTL patch，重跑
+   三項 simulation 與完整 threshold sweep。
+3. 目標改成 timing、power 或可維護性，而不再只追求 occupied slices；否則重現 47 slices
+   但 timing 相同或更差不構成改善。
+
+`report_qor_assessment` 與 `report_qor_suggestions` 在目前 Vivado BASIC license 不可用；
+其餘 methodology、route、hierarchy、primitive、packing 與 r3 locality reports 已產生。
+
