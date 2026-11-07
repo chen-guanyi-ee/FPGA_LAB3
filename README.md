@@ -1,7 +1,5 @@
-10/25
-slice=47
-做完高階突變
-正在低階flow當中
+11/07
+slice = 45
 完整資訊在handoff.txt
 
 bonus
