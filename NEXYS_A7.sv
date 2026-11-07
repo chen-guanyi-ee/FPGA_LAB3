@@ -2,7 +2,7 @@ module NEXYS_A7 #(
     parameter integer AUDIO_W = 7
 )(
     input  logic CLK100MHZ,
-    input  logic [2:0] SW,
+    input  logic [5:0] SW,
     output logic M_CLK,
     input  logic M_DATA,
     output logic M_LRSEL,
@@ -52,7 +52,8 @@ module NEXYS_A7 #(
         .data_in(M_DATA),
         .record_btn(SW[0]),
         .pause_on(SW[1]),
-        .speed_btn(SW[2]),
+        .speed_select(SW[5:2]),
         .data_out(audio_bit)
     );
 endmodule
+
