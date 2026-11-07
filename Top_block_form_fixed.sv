@@ -8,7 +8,7 @@ module Top #(
     input  logic       data_in,
     input  logic       record_btn,
     input  logic       pause_on,
-    input  logic       speed_btn,
+    input  logic [3:0] speed_select,
     output logic       data_out = 1'b0
 );
     localparam integer ADDR_W  = $clog2(RECORD_SAMPLES);
@@ -43,7 +43,10 @@ module Top #(
     } state_t;
 
     state_t state = S_IDLE;
-    logic [3:0] speed_mode = '0;
+    logic [3:0] speed_mode;
+    // SW[5:2] directly selects the existing 15 playback modes.  The unused
+    // 4'hf code has a defined safe behavior: normal 1x playback.
+    assign speed_mode = (&speed_select) ? 4'd0 : speed_select;
 
     // Split the 200000 x AUDIO_W-bit store into 32K-sample banks. Explicit banks
     // avoid a fragile deep RAMB36 cascade for a single 200K-deep memory.
@@ -261,13 +264,11 @@ module Top #(
     logic signed [PCM_W-1:0] pcm_current = '0;
 
     // The board controls enter Top directly.  Convert the record switch's
-    // rising edge and the speed switch's falling edge into one-clock events.
+    // rising edge into a one-clock event.  Playback speed is selected directly
+    // by speed_select, so no edge detector or mode counter is required.
     logic record_previous = 1'b0;
-    logic speed_previous = 1'b0;
     logic record_press;
-    logic speed_release;
     assign record_press  = record_btn & ~record_previous;
-    assign speed_release = speed_previous & ~speed_btn;
 
     // First-order PCM_W-bit sigma-delta DAC. Run it at the full 100 MHz fabric
     // clock, independently of the 3.125 MHz microphone sample enable. Signed
@@ -285,7 +286,6 @@ module Top #(
 
     always_ff @(posedge clk) begin
         record_previous <= record_btn;
-        speed_previous  <= speed_btn;
         mem_we <= 1'b0;
         mem_re <= 1'b0;
         read_pending <= {read_pending[0], mem_re};
@@ -296,14 +296,6 @@ module Top #(
                     state       <= S_PLAY;
                     decim_count <= '0;
                 end
-            end
-
-            if (speed_release) begin
-                if (speed_mode == 4'd14)
-                    speed_mode <= 4'd0;
-                else
-                    speed_mode <= speed_mode + 1'b1;
-                slow_count <= '0;
             end
 
             if (record_press) begin
@@ -372,9 +364,7 @@ module Top #(
                             if (!pause_on) begin
                                 if (decim_count == DECIM_LAST) begin
                                     decim_count <= '0;
-                                    if (speed_release) begin
-                                        slow_count <= '0;
-                                    end else if ((speed_mode < 4'd8) ||
+                                    if ((speed_mode < 4'd8) ||
                                                  (slow_count == slow_terminal)) begin
                                         slow_count <= '0;
                                         if (address_sum >= RECORD_SIZE_EXT) begin
@@ -429,4 +419,5 @@ module PcmBramBank #(
         end
     end
 endmodule
+
 
