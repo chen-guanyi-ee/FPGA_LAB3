@@ -213,3 +213,103 @@ slice，暫時不要再重寫記憶體或解除 bank hierarchy（後者已知更
 `report_qor_assessment` 與 `report_qor_suggestions` 在目前 Vivado BASIC license 不可用；
 其餘 methodology、route、hierarchy、primitive、packing 與 r3 locality reports 已產生。
 
+## 2026-11-07 更新：direct speed encoding 與 45-slice 正式版本
+
+本節是最新狀態，優先於前文「47 slices 已收斂」及舊 speed-mode counter 的敘述。
+
+### 板上控制與 RTL 變更
+
+- `SW[0]`：錄音觸發；由 0 切到 1 產生 `record_press`，錄滿後自動播放。
+- `SW[1]`：pause level；1 暫停、0 繼續。
+- `SW[5:2]`：4-bit direct speed code，位元順序為 `SW5 SW4 SW3 SW2`。
+- 已從 `Top_block_form_fixed.sv` 移除 `speed_previous`、`speed_release`、4-bit
+  `speed_mode` register，以及 increment/wrap 邏輯。`speed_mode` 現為 direct decode：
+
+| `SW[5:2]` | 播放速度 |
+|---|---:|
+| `0000`..`0111` | 1x..8x |
+| `1000`..`1110` | 1/2x..1/8x |
+| `1111` | reserved，安全映射為 1x |
+
+- `NEXYS_A7.sv` 的 `SW` port 已由 `[2:0]` 擴成 `[5:0]`；`audio_minimal.xdc`
+  新增 SW3/R15、SW4/R17、SW5/T18。
+- 現行最低面積版本刻意沒有 debounce，也沒有 2-FF synchronizer：三組控制都是 raw
+  asynchronous slide-switch inputs。`SW[0]` 的 edge detector 不是 debounce；未使用板上的
+  BTNU/BTND/BTNL/BTNR/BTNC。`ButtonPanel.sv` 未被 instantiate。
+
+### 兩輪 DSE 與正式 Pareto
+
+run ID：`speed-encoding-20261107-r1`。依 Agentic-DSE 流程跑兩輪、每輪 Explorer／
+Exploiter／Innovator，各 assignment 最多三次嘗試；所有正式候選都以 100 MHz、三項 RTL
+regression、完整 implementation、setup/hold、DRC 與 route status 驗證。
+
+Round 1 高階候選：
+
+| 候選 | slices | LUT | FF | WNS/WHS |
+|---|---:|---:|---:|---:|
+| direct combinational | **46** | **111** | 105 | 2.491/0.156 ns |
+| 2-stage synchronized direct code | 52 | 113 | 113 | 1.783/0.062 ns |
+| synchronized boundary snapshot | 52 | 117 | 117 | 2.083/0.112 ns |
+
+Round 2 以 byte-identical 46-slice RTL 做低階 sweep：
+
+| synthesis mapping | slices | LUT | FF | control sets | WNS/WHS |
+|---|---:|---:|---:|---:|---:|
+| threshold 1 | 46 | **111** | 105 | 13 | 2.491/0.156 ns |
+| threshold 4 | **45** | 125 | 105 | **9** | 2.807/0.090 ns |
+| auto | 56 | 126 | 105 | 12 | 2.401/0.121 ns |
+
+另外六個合法 place/route／physical-only variants 全部重現 46 slices，沒有到 45。
+目前保留兩個正式 Pareto 點：
+
+- `speed-direct-45`：slice-first 最佳，45 slices／125 LUT／105 FF。
+- `speed-direct-46`：少 14 LUT，46 slices／111 LUT／105 FF。
+
+45-slice 正式結果為 49 RAMB36、0 DSP、setup/hold failing endpoints 0/0、DRC 0、
+routing errors 0；三項 regression 全部 PASS：
+
+- `tb/Top_tb.sv`：record、auto-play、15 speed codes、reserved code、pause/resume。
+- `tb/Block_cic_r250_edge_tb.sv`：R=250 block CIC2 bit-exact，含 post-edge M_DATA 改變。
+- `tmp/Muxf_read_select_tb.sv`：七個 BRAM bank 的 explicit MUXF7 selector。
+
+### 正式產物與 archive
+
+- 最新 RTL：`Top_block_form_fixed.sv`、`NEXYS_A7.sv`。
+- 最新 constraints：`audio_minimal.xdc`。
+- 45-slice DCP：`build/reports/block_form_fixed/post_route_best45.dcp`。
+- 標準報告：`build/reports/block_form_fixed/post_route_utilization.rpt`、
+  `post_route_timing.rpt`、`post_route_drc.rpt`、`post_route_control_sets.rpt`。
+- 最新 bitstream：
+  `build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`。
+- 舊 47-slice bitstream：
+  `build/preserved/NEXYS_A7_47slice_pre_speed_20261107.bit`。
+- 舊 47-slice 報告快照：
+  `build/reports/block_form_fixed_pre_speed_47_20261107/`。
+- 完整 DSE workspace/result immutable snapshots：
+  `archive/speed-encoding-20261107-r1/round-001/` 與 `round-002/`。
+- 目前 formal state：`state/search_directive.json`、`architecture_decisions.json`、
+  `pareto_front.json`、`lineage.json`、`agent_contributions.json`。
+
+### 實機燒錄狀態
+
+2026-11-07 15:45（Asia/Taipei）已用：
+
+```powershell
+& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch `
+  -source .\program_device.tcl -tclargs block_fixed
+```
+
+成功透過 Digilent target `210292BF6D74A` 燒入 `xc7a100t`；Vivado 回報 startup status
+`HIGH`，bitstream 路徑為上述 45-slice `NEXYS_A7.bit`。這是 JTAG 寫入 FPGA SRAM，斷電後
+會消失；尚未寫入 QSPI flash。
+
+### 後續注意事項
+
+- 若面積仍是第一目標，保留目前 raw direct-code 45-slice 版本。
+- 若可靠性優先，下一個合理候選是增加 switch synchronizer/debounce；已知完整同步候選
+  目前為 52 slices，不可宣稱不增加面積。
+- 切換 `SW[5:2]` 時可能短暫經過其他碼；`SW[0]` bounce 可能造成重複錄音觸發；
+  `SW[1]` bounce 可能短暫 pause/resume。
+- 重新建置仍可使用 `tmp/run_block_form_fixed.tcl`；它會 sweep control-set threshold，
+  目前 source 下預期 threshold 4 產生 45-slice 最佳點。
+
