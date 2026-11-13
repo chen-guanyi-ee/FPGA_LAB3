@@ -313,3 +313,94 @@ routing errors 0；三項 regression 全部 PASS：
 - 重新建置仍可使用 `tmp/run_block_form_fixed.tcl`；它會 sweep control-set threshold，
   目前 source 下預期 threshold 4 產生 45-slice 最佳點。
 
+## 2026-11-13 更新：16x 飽和限幅與 58-slice 實機版本
+
+本節是目前最新狀態，優先於前文「45-slice 最新版本」與「threshold 4 預期產生
+45 slices」的敘述。舊 45-slice 結果仍是有效歷史基準，但不包含本節新增的錄音限幅功能。
+
+### 爆音修正與數值行為
+
+- `Top_block_form_fixed.sv` 的 `RECORD_GAIN_BITS` 已由 6 改為 4，錄音增益由 **64x**
+  降為 **16x**。
+- `cic_to_pcm()` 現在先將完整 CIC 結果右移，再限制到 signed 7-bit 範圍
+  `-64..+63`；超範圍不再二補數回繞。目的為避免大聲輸入由正峰值瞬間回繞成負峰值，
+  形成全幅不連續與爆音。
+- 錄音／播放 state machine、200,000-sample 記憶體、direct speed encoding、pause、
+  MUXF7 read selector 與 sigma-delta DAC 均未改動。
+- `tb/Top_tb.sv` 已通過 record、auto-play、speed、pause/resume regression。
+- `tb/Block_cic_r250_edge_tb.sv` 的 reference model 已同步為 16x＋7-bit saturation，
+  R=250 bit-exact regression 通過。
+
+### 為何面積由 45 增到 58 slices
+
+目前 RTL 與 immutable 45-slice RTL 的功能 diff 只有增益常數與 `cic_to_pcm()` 限幅。
+面積增加不只是兩個 comparator：
+
+- 舊 64x 回繞版本只保留右移後的低 7 bits，CIC 高位不影響輸出；Vivado 可裁掉部分
+  高位 datapath 與 state bits。
+- 新飽和版本必須讀取完整 17-bit CIC 結果，判斷是否超過 `+63/-64`；原本不可觀察的
+  高位變成必要邏輯，因此綜合後多保留約 30 LUT 與 15 FF。
+- 舊 threshold-4：45 slices／125 LUT／105 FF／9 control sets。
+- 新 threshold-4：59 slices／160 LUT／120 FF／9 control sets。
+- 新最佳 threshold-8：58 slices／155 LUT／120 FF／8 control sets。
+
+因此 45→58 是「完整精度飽和使高位不可再裁除」的結構性成本，不是單純 placement seed
+波動。若保留目前完整 17-bit 判斷語意，不應預期只靠一般 directive 回到 45 slices。
+
+### 2026-11-13 control-set strategy sweep
+
+以相同的 16x＋飽和 RTL、100 MHz constraints、`AreaOptimized_high` synthesis、
+`ExploreArea` opt、default place、`Explore` route，重跑 handoff 既有 threshold sweep：
+
+| synthesis mapping | slices | LUT | FF | control sets | WNS/WHS | DRC |
+|---|---:|---:|---:|---:|---:|---:|
+| threshold 1 | 62 | 141 | 120 | 14 | 1.744/0.092 ns | 0 |
+| threshold 4 | 59 | 160 | 120 | 9 | 1.869/0.123 ns | 0 |
+| threshold 8 | **58** | **155** | 120 | 8 | **3.075/0.079 ns** | 0 |
+| threshold 16 | 66 | 155 | 120 | 7 | 2.819/0.067 ns | 0 |
+| auto | 61 | 157 | 120 | 12 | 1.759/0.074 ns | 0 |
+
+五個候選皆為 setup/hold failing endpoints 0/0、DRC 0、failed/unrouted nets 0。
+正式選用 `threshold 8` 的 58-slice routed checkpoint：
+
+- DCP：`build/reports/block_form_fixed/post_route_best58.dcp`
+- reports：`build/reports/block_form_fixed/post_route_utilization.rpt`、
+  `post_route_timing.rpt`、`post_route_drc.rpt`、`post_route_control_sets.rpt`
+- sweep evidence：`tmp/control_set_sweep/`
+- bitstream：`build/block_form_fixed/block_form_fixed.runs/impl_1/NEXYS_A7.bit`
+- immutable named copy：
+  `build/preserved/NEXYS_A7_58slice_16x_saturating_20261113.bit`
+- bitstream SHA-256：
+  `F4EDB0E7F5E280DF396563B5BDC72AD26F4F6D9D410AF574AB9F2503C0D0E395`
+
+### 實機燒錄狀態
+
+2026-11-13 13:35（Asia/Taipei）已透過 Digilent target `210292BF6D74A` 將上述
+58-slice bitstream 燒入 `xc7a100t`。Vivado 回報 `End of startup status: HIGH`；這是
+JTAG 寫入 FPGA SRAM，斷電後會消失，尚未寫入 QSPI flash。
+
+### 後續 strategy
+
+目前 primary objective 仍是 occupied slices，功能 contract 為 16x 增益、signed 7-bit
+飽和、既有錄放／速度／pause 行為與 100 MHz timing。後續依下列順序執行：
+
+1. **Physical-only bounded sweep（不改 RTL）**：以 `post_route_best58.dcp`／對應
+   post-synth checkpoint 為 parent，重跑 handoff 已驗證可用的 `Explore`、
+   `ExtraPostPlacementOpt`、`WLDrivenBlockPlacement` 與有限 route directives。
+   僅接受三項 regression 不變、WNS/WHS >= 0、DRC 0、failed nets 0 且 slices < 58
+   的候選；同 slice 但 timing 更差不晉級。
+2. **檢查 saturation cone 與 retained high bits**：用 hierarchy utilization、schematic、
+   control-set 與 primitive reports 確認新增 30 LUT／15 FF 的確切歸屬。只有找到可共享
+   既有 CIC ALU、可 bit-exact factor comparator，或可合法消除的 duplicated high-bit
+   state 時，才做單一最小 RTL patch。
+3. **不要重跑已知無效策略**：不做 forced fanout replication、`-no_psip`、一般 seed
+   海量 sweep、完整 CIC pblock/locality、已失敗的 5FF BEL 指派；舊 handoff 已證明這些
+   對相近結構沒有面積收益。
+4. **若目標必須接近 45 slices**：需明確接受數值 contract 改變，例如移除完整精度飽和、
+   只保留 16x 降增益與原本回繞行為，或採另一種較低成本的爆音抑制。這不是 physical
+   strategy 能保證做到的；任何替代方案都必須重新做聽感／溢位測試與完整 regression。
+
+目前建議先保留已燒錄的 58-slice 版本作為可回復 baseline，再進行第 1 項有限
+physical-only sweep；不要覆蓋具名 bitstream 或 `post_route_best58.dcp`。
+
+
