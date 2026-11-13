@@ -24,7 +24,7 @@ module Top #(
     localparam integer BLOCK_STATE_W =
         1 + $clog2((DECIMATION*(DECIMATION+1))/2 + 1);
     localparam integer CIC_SHIFT_RAW = 2*$clog2(DECIMATION) - (PCM_W-1);
-    localparam integer RECORD_GAIN_BITS = 6;
+    localparam integer RECORD_GAIN_BITS = 4;
     localparam integer CIC_SHIFT_GAINED = CIC_SHIFT_RAW - RECORD_GAIN_BITS;
     localparam integer CIC_SHIFT = (CIC_SHIFT_GAINED > 0) ? CIC_SHIFT_GAINED : 0;
     localparam integer BANK_ADDR_W = (ADDR_W < 15) ? ADDR_W : 15;
@@ -165,13 +165,25 @@ module Top #(
         end
     endfunction
 
-    // Normalize the CIC gain and apply 64x record gain.  Keep only the low
-    // PCM_W bits; over-range samples intentionally wrap instead of saturating.
+    // Normalize the CIC gain and apply 16x record gain.  Saturate before
+    // narrowing so microphone peaks cannot wrap across zero and create a
+    // full-scale discontinuity (heard as a pop/crackle).
     function automatic logic signed [PCM_W-1:0] cic_to_pcm(
         input logic signed [CIC_W-1:0] sample
     );
+        logic signed [CIC_W-1:0] scaled;
+        logic signed [CIC_W-1:0] pcm_max;
+        logic signed [CIC_W-1:0] pcm_min;
         begin
-            cic_to_pcm = sample >>> CIC_SHIFT;
+            scaled  = sample >>> CIC_SHIFT;
+            pcm_max = (1 <<< (PCM_W-1)) - 1;
+            pcm_min = -(1 <<< (PCM_W-1));
+            if (scaled > pcm_max)
+                cic_to_pcm = {1'b0, {(PCM_W-1){1'b1}}};
+            else if (scaled < pcm_min)
+                cic_to_pcm = {1'b1, {(PCM_W-1){1'b0}}};
+            else
+                cic_to_pcm = scaled;
         end
     endfunction
 
